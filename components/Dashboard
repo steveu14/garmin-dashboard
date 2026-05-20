@@ -1,0 +1,230 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import Papa from "papaparse";
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, CartesianGrid, LineChart, Line
+} from "recharts";
+
+const SHEET_ID = "19vjqayIvLC-OxD7D5f9Vna1fbXj8aXCGqpW2Vxa8-1U";
+const DAILY_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Daily%20Stats`;
+const ACT_URL   = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=Activities`;
+
+type DailyRow = Record<string, string>;
+type ActivityRow = Record<string, string>;
+
+async function fetchCSV<T>(url: string): Promise<T[]> {
+  const res = await fetch(url);
+  const text = await res.text();
+  return Papa.parse<T>(text, { header: true, skipEmptyLines: true }).data;
+}
+
+function fmt(n: string | number) {
+  return Math.round(Number(n || 0)).toLocaleString();
+}
+
+function fmtDate(d: string) {
+  if (!d) return "";
+  const p = d.split("-");
+  if (p.length < 3) return d;
+  const m = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return m[parseInt(p[1]) - 1] + " " + parseInt(p[2]);
+}
+
+function fmtType(t: string) {
+  if (!t) return "";
+  return t.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+const s = {
+  page: { fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", background: "#f5f5f3", minHeight: "100vh", padding: "2rem 1rem", color: "#1a1a18" } as React.CSSProperties,
+  container: { maxWidth: 960, margin: "0 auto" } as React.CSSProperties,
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" } as React.CSSProperties,
+  h1: { fontSize: 22, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 10 } as React.CSSProperties,
+  dot: { width: 10, height: 10, borderRadius: "50%", background: "#10b981", display: "inline-block" } as React.CSSProperties,
+  subtitle: { fontSize: 13, color: "#888", marginTop: 2 } as React.CSSProperties,
+  refreshBtn: { fontSize: 13, color: "#666", cursor: "pointer", background: "#fff", border: "1px solid #e0e0e0", borderRadius: 8, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 } as React.CSSProperties,
+  cards: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: "1.5rem" } as React.CSSProperties,
+  card: { background: "#fff", border: "1px solid #e8e8e6", borderRadius: 14, padding: "16px 18px" } as React.CSSProperties,
+  cardLabel: { fontSize: 11, color: "#999", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: 8, display: "flex", alignItems: "center", gap: 6 },
+  cardDot: (c: string) => ({ width: 8, height: 8, borderRadius: "50%", background: c, display: "inline-block" } as React.CSSProperties),
+  cardValue: { fontSize: 26, fontWeight: 700, color: "#1a1a18", lineHeight: 1.1 } as React.CSSProperties,
+  cardUnit: { fontSize: 14, fontWeight: 400, color: "#999" } as React.CSSProperties,
+  cardSub: { fontSize: 11, color: "#bbb", marginTop: 4 } as React.CSSProperties,
+  chartCard: { background: "#fff", border: "1px solid #e8e8e6", borderRadius: 14, padding: "20px", marginBottom: "1.5rem" } as React.CSSProperties,
+  chartHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 } as React.CSSProperties,
+  tabs: { display: "flex", gap: 6 } as React.CSSProperties,
+  tab: (active: boolean, color: string) => ({ padding: "5px 14px", borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: "pointer", border: "none", background: active ? color : "transparent", color: active ? "#fff" : "#999", transition: "all 0.15s" } as React.CSSProperties),
+  sectionLabel: { fontSize: 11, color: "#999", fontWeight: 600, textTransform: "uppercase" as const, letterSpacing: "0.06em" } as React.CSSProperties,
+  tableWrap: { overflowX: "auto" as const } as React.CSSProperties,
+  table: { width: "100%", borderCollapse: "collapse" as const, fontSize: 13 } as React.CSSProperties,
+  th: { textAlign: "left" as const, fontSize: 11, fontWeight: 600, color: "#999", textTransform: "uppercase" as const, letterSpacing: "0.05em", padding: "8px 12px", borderBottom: "1px solid #f0f0ee" } as React.CSSProperties,
+  td: { padding: "10px 12px", borderBottom: "1px solid #f7f7f5", color: "#1a1a18" } as React.CSSProperties,
+  tdMuted: { padding: "10px 12px", borderBottom: "1px solid #f7f7f5", color: "#bbb", fontSize: 12 } as React.CSSProperties,
+  badge: { display: "inline-block", padding: "3px 9px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: "rgba(16,185,129,0.1)", color: "#059669" } as React.CSSProperties,
+  loading: { display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "center", gap: 12, padding: "4rem 0", color: "#999", fontSize: 14 } as React.CSSProperties,
+  spinner: { width: 28, height: 28, border: "3px solid #eee", borderTopColor: "#10b981", borderRadius: "50%", animation: "spin 0.8s linear infinite" } as React.CSSProperties,
+  error: { background: "#fff5f5", border: "1px solid #fecaca", borderRadius: 14, padding: "16px 20px", fontSize: 13, color: "#dc2626" } as React.CSSProperties,
+};
+
+const CustomTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div style={{ background: "#fff", border: "1px solid #e8e8e6", borderRadius: 10, padding: "8px 12px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)", fontSize: 13 }}>
+        <div style={{ color: "#999", fontSize: 11, marginBottom: 2 }}>{label}</div>
+        <div style={{ fontWeight: 700, color: "#1a1a18" }}>{Number(payload[0].value).toLocaleString()}</div>
+      </div>
+    );
+  }
+  return null;
+};
+
+export default function Dashboard() {
+  const [daily, setDaily] = useState<DailyRow[]>([]);
+  const [activities, setActivities] = useState<ActivityRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState("");
+  const [activeTab, setActiveTab] = useState<"steps" | "calories">("steps");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [d, a] = await Promise.all([fetchCSV<DailyRow>(DAILY_URL), fetchCSV<ActivityRow>(ACT_URL)]);
+      setDaily(d);
+      setActivities(a);
+      setUpdatedAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const totalSteps = daily.reduce((s, r) => s + Number(r.Steps || 0), 0);
+  const totalCals  = daily.reduce((s, r) => s + Number(r["Total Calories"] || 0), 0);
+  const avgActive  = daily.length ? Math.round(daily.reduce((s, r) => s + Number(r["Active Minutes"] || 0), 0) / daily.length) : 0;
+  const hrVals     = daily.map(r => Number(r["Resting HR"] || 0)).filter(v => v > 0);
+  const avgHR      = hrVals.length ? Math.round(hrVals.reduce((a, b) => a + b, 0) / hrVals.length) : null;
+  const actCals    = activities.reduce((s, r) => s + Number(r.Calories || 0), 0);
+
+  const chartData = daily.map(r => ({
+    date: fmtDate(r.Date),
+    steps: Number(r.Steps || 0),
+    calories: Number(r["Total Calories"] || 0),
+    active: Number(r["Active Minutes"] || 0),
+  }));
+
+  if (loading) return (
+    <div style={s.loading}>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <div style={s.spinner} />
+      <span>Loading your data...</span>
+    </div>
+  );
+
+  if (error) return (
+    <div style={s.error}>
+      Could not load data. Make sure your Google Sheet is shared publicly as Viewer.<br />
+      <span style={{ opacity: 0.6, fontSize: 11 }}>{error}</span>
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Stat Cards */}
+      <div style={s.cards}>
+        {[
+          { label: "Steps", value: fmt(totalSteps), sub: `last ${daily.length} days`, color: "#10b981" },
+          { label: "Calories", value: fmt(totalCals), sub: `last ${daily.length} days`, color: "#f97316" },
+          { label: "Avg Active", value: `${avgActive}`, unit: "min", sub: "per day", color: "#f59e0b" },
+          { label: "Resting HR", value: avgHR ? String(avgHR) : "—", unit: avgHR ? "bpm" : "", sub: "avg resting", color: "#ec4899" },
+          { label: "Activity Cals", value: fmt(actCals), sub: `${activities.length} activities`, color: "#3b82f6" },
+        ].map(({ label, value, unit, sub, color }) => (
+          <div key={label} style={s.card}>
+            <div style={s.cardLabel}><span style={s.cardDot(color)} />{label}</div>
+            <div style={s.cardValue}>{value}{unit && <span style={s.cardUnit}> {unit}</span>}</div>
+            <div style={s.cardSub}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Steps / Calories Chart */}
+      <div style={s.chartCard}>
+        <div style={s.chartHeader}>
+          <div style={s.tabs}>
+            <button style={s.tab(activeTab === "steps", "#10b981")} onClick={() => setActiveTab("steps")}>Steps</button>
+            <button style={s.tab(activeTab === "calories", "#f97316")} onClick={() => setActiveTab("calories")}>Calories</button>
+          </div>
+          <span style={s.sectionLabel}>Last {daily.length} days</span>
+        </div>
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={chartData} barSize={32}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" vertical={false} />
+            <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false}
+              tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : String(v)} />
+            <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(0,0,0,0.03)" }} />
+            {activeTab === "steps"
+              ? <Bar dataKey="steps" fill="#10b981" radius={[5, 5, 0, 0]} />
+              : <Bar dataKey="calories" fill="#f97316" radius={[5, 5, 0, 0]} />}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Active Minutes */}
+      <div style={s.chartCard}>
+        <div style={s.chartHeader}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a18" }}>Active Minutes Trend</span>
+          <span style={s.sectionLabel}>Last {daily.length} days</span>
+        </div>
+        <ResponsiveContainer width="100%" height={160}>
+          <LineChart data={chartData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.05)" vertical={false} />
+            <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
+            <YAxis tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
+            <Tooltip content={<CustomTooltip />} />
+            <Line dataKey="active" stroke="#f59e0b" strokeWidth={2.5} dot={{ r: 4, fill: "#f59e0b", strokeWidth: 0 }} activeDot={{ r: 6 }} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Activities Table */}
+      <div style={{ ...s.chartCard, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid #f0f0ee" }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a18" }}>Activities</span>
+        </div>
+        {activities.length === 0 ? (
+          <p style={{ color: "#bbb", fontSize: 13, padding: 20 }}>No activities found.</p>
+        ) : (
+          <div style={s.tableWrap}>
+            <table style={s.table}>
+              <thead>
+                <tr>{["Date","Activity","Type","Distance","Duration","Calories","Avg HR"].map(h => (
+                  <th key={h} style={s.th}>{h}</th>
+                ))}</tr>
+              </thead>
+              <tbody>
+                {activities.slice().reverse().map((a, i) => (
+                  <tr key={i} style={{ background: i % 2 === 0 ? "#fff" : "#fafaf8" }}>
+                    <td style={s.tdMuted}>{fmtDate(a.Date)}</td>
+                    <td style={{ ...s.td, fontWeight: 600 }}>{a["Activity Name"] || "—"}</td>
+                    <td style={s.td}><span style={s.badge}>{fmtType(a.Type)}</span></td>
+                    <td style={s.td}>{Number(a["Distance (km)"] || 0).toFixed(1)} km</td>
+                    <td style={s.td}>{Math.round(Number(a["Duration (min)"] || 0))} min</td>
+                    <td style={s.td}>{fmt(a.Calories)}</td>
+                    <td style={s.td}>{a["Avg HR"] || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
