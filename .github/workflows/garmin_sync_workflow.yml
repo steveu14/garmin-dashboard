@@ -26,5 +26,5 @@ jobs:
 
       - name: Run Garmin sync
         env:
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          GARMIN_PASSWORD: ${{ secrets.GARMINPW }}
         run: python garmin_sync.py
