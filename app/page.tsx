@@ -1,16 +1,15 @@
 import Dashboard from "@/components/Dashboard";
+import { RefreshCw } from "lucide-react";
 
 export default function Home() {
   return (
-    <main style={{ maxWidth: 960, margin: "0 auto", padding: "2rem 1rem", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "2rem" }}>
-        <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ width: 12, height: 12, borderRadius: "50%", background: "#10b981", display: "inline-block" }} />
-            Fitness Dashboard
-          </h1>
-          <p style={{ fontSize: 13, color: "#999", marginTop: 4 }}>Synced from Garmin Connect</p>
+    <main className="max-w-5xl mx-auto px-4 py-8">
+      <div className="mb-8">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="w-3 h-3 rounded-full bg-primary inline-block animate-pulse" />
+          <h1 className="text-2xl font-bold tracking-tight">Fitness Dashboard</h1>
         </div>
+        <p className="text-sm text-muted-foreground">Synced from Garmin Connect</p>
       </div>
       <Dashboard />
     </main>
