@@ -22,9 +22,9 @@ jobs:
         run: pip install garminconnect gspread google-auth
 
       - name: Write Google credentials
-        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > garmin-dashboard/credentials.json
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
 
       - name: Run Garmin sync
         env:
           GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
-        run: python garmin-dashboard/garmin_sync.py
+        run: python garmin_sync.py
