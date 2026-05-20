@@ -2,7 +2,6 @@ import garminconnect
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, timedelta
-import getpass
 import os
 
 # Config
@@ -42,9 +41,9 @@ def sync():
     )
 
     print("Logging into Garmin Connect...")
-
-    # Use env variable if available (GitHub Actions), otherwise prompt
-    password = os.environ.get("GARMIN_PASSWORD") or getpass.getpass("Enter your Garmin Connect password: ")
+    password = os.environ.get("GARMIN_PASSWORD")
+    if not password:
+        raise ValueError("GARMIN_PASSWORD environment variable is not set")
 
     client = garminconnect.Garmin(GARMIN_EMAIL, password, prompt_mfa=get_mfa)
     client.login()
