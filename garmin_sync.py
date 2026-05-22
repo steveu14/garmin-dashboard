@@ -52,6 +52,7 @@ def sync():
     today = date.today()
     start_date = today - timedelta(days=DAYS_TO_SYNC)
 
+    # ── Daily stats ───────────────────────────────────────────────────────────
     print("Fetching daily stats...")
     existing_dates = set(daily_ws.col_values(1)[1:])
 
@@ -79,12 +80,25 @@ def sync():
         except Exception as e:
             print("  Could not fetch stats for " + day_str + ": " + str(e))
 
+    # ── Activities ────────────────────────────────────────────────────────────
     print("\nFetching activities...")
     try:
+        # Build a set of existing activity keys (date + name + duration)
+        existing_rows = activities_ws.get_all_values()[1:]  # skip header
+        existing_keys = set()
+        for row in existing_rows:
+            if len(row) >= 5:
+                # key = date + activity name + duration
+                key = (row[0] + "|" + row[1] + "|" + row[4]).strip()
+                existing_keys.add(key)
+
         activities = client.get_activities_by_date(
             start_date.strftime("%Y-%m-%d"),
             today.strftime("%Y-%m-%d")
         )
+
+        added = 0
+        skipped = 0
         for act in activities:
             act_date = (act.get("startTimeLocal") or "")[:10]
             act_name = act.get("activityName", "N/A")
@@ -92,10 +106,22 @@ def sync():
             distance = round((act.get("distance") or 0) / 1000, 2)
             duration = round((act.get("duration") or 0) / 60, 1)
             calories = act.get("calories", 0) or 0
-            avg_hr = act.get("averageHR", "N/A")
+            avg_hr   = act.get("averageHR", "N/A")
+
+            # Check for duplicate using date + name + duration as unique key
+            key = (act_date + "|" + act_name + "|" + str(duration)).strip()
+            if key in existing_keys:
+                skipped += 1
+                print("  Skipping duplicate: " + act_name + " on " + act_date)
+                continue
 
             activities_ws.append_row([act_date, act_name, act_type, distance, duration, calories, avg_hr])
+            existing_keys.add(key)
+            added += 1
             print("  Added: " + act_name + " on " + act_date)
+
+        print("\n  " + str(added) + " activities added, " + str(skipped) + " duplicates skipped.")
+
     except Exception as e:
         print("  Could not fetch activities: " + str(e))
 
