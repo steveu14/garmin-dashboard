@@ -1,131 +1,182 @@
-import garminconnect
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import date, timedelta
+"""
+Pulls Garmin Connect activities + daily health metrics into Supabase.
+
+Requires garminconnect >= 0.3.1 (the version that replaced garth with a
+native curl_cffi-based auth engine after Garmin's March 2026 Cloudflare
+changes). Older versions cannot log in.
+
+    pip install "garminconnect>=0.3.1" curl_cffi ua-generator supabase
+
+Env vars required:
+  GARMIN_PASSWORD     (email is hardcoded below, same as before)
+  SUPABASE_URL
+  SUPABASE_KEY        (service role key -- this script bypasses RLS)
+
+Optional:
+  SYNC_START_DATE     ISO date. If unset, defaults to a rolling lookback
+                       window (LOOKBACK_DAYS) for routine scheduled runs.
+                       For the one-time historical backfill, run this once
+                       with SYNC_START_DATE=2026-06-15 (the plan's start).
+
+Notes on reliability:
+  - Each metric fetch is wrapped in its own try/except so one broken or
+    rate-limited endpoint doesn't abort the whole sync.
+  - Garmin's Cloudflare protections are known to be stricter against
+    datacenter/cloud IPs than home IPs. If this fails when run from
+    GitHub-hosted Actions runners, prefer running it locally or from a
+    self-hosted runner instead.
+"""
+
 import os
+import sys
+import time
+from datetime import date, timedelta
 
-# Config
-CREDENTIALS_PATH = "credentials.json"
-SHEET_ID         = "19vjqayIvLC-OxD7D5f9Vna1fbXj8aXCGqpW2Vxa8-1U"
-GARMIN_EMAIL     = "stevenwu3084@gmail.com"
-DAYS_TO_SYNC     = 7
+import garminconnect
+from supabase import create_client
 
-def get_or_create_worksheet(sheet, title, headers):
-    try:
-        ws = sheet.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sheet.add_worksheet(title=title, rows=1000, cols=len(headers))
-        ws.append_row(headers)
-    return ws
+CREDENTIALS_EMAIL = "stevenwu3084@gmail.com"
+LOOKBACK_DAYS = 7
+TOKEN_STORE = os.path.expanduser("~/.garminconnect")
+
 
 def get_mfa():
     return input("Enter your Garmin MFA code: ")
 
-def sync():
-    print("Connecting to Google Sheets...")
-    scopes = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = Credentials.from_service_account_file(CREDENTIALS_PATH, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
 
-    daily_ws = get_or_create_worksheet(
-        sh, "Daily Stats",
-        ["Date", "Steps", "Total Calories", "Active Minutes", "Resting HR", "Avg HR"]
-    )
-    activities_ws = get_or_create_worksheet(
-        sh, "Activities",
-        ["Date", "Activity Name", "Type", "Distance (km)", "Duration (min)", "Calories", "Avg HR"]
-    )
-
-    print("Logging into Garmin Connect...")
+def get_garmin_client():
     password = os.environ.get("GARMIN_PASSWORD")
     if not password:
-        raise ValueError("GARMIN_PASSWORD environment variable is not set")
+        sys.exit("Set GARMIN_PASSWORD environment variable.")
 
-    client = garminconnect.Garmin(GARMIN_EMAIL, password, prompt_mfa=get_mfa)
-    client.login()
-    print("Logged in successfully.\n")
+    client = garminconnect.Garmin(CREDENTIALS_EMAIL, password, prompt_mfa=get_mfa)
+    try:
+        client.login(TOKEN_STORE)
+    except Exception:
+        client.login()
+    return client
 
-    today = date.today()
-    start_date = today - timedelta(days=DAYS_TO_SYNC)
 
-    # ── Daily stats ───────────────────────────────────────────────────────────
-    print("Fetching daily stats...")
-    existing_dates = set(daily_ws.col_values(1)[1:])
+def get_supabase_client():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        sys.exit("Set SUPABASE_URL and SUPABASE_KEY environment variables.")
+    return create_client(url, key)
 
-    for i in range(DAYS_TO_SYNC):
-        day = start_date + timedelta(days=i)
-        day_str = day.strftime("%Y-%m-%d")
 
-        if day_str in existing_dates:
-            print("  Skipping " + day_str + " (already in sheet)")
+def daterange(start: date, end: date):
+    d = start
+    while d <= end:
+        yield d
+        d += timedelta(days=1)
+
+
+def parse_pace_sec_per_km(activity: dict):
+    speed = activity.get("averageSpeed")  # m/s
+    if not speed:
+        return None
+    try:
+        return round(1000 / speed)
+    except ZeroDivisionError:
+        return None
+
+
+def sync_activities(client, sb, start: date, end: date):
+    print(f"Fetching activities {start} to {end}...")
+    activities = client.get_activities_by_date(start.isoformat(), end.isoformat())
+    rows = []
+    for a in activities:
+        activity_id = a.get("activityId")
+        if not activity_id:
             continue
+        start_time_raw = a.get("startTimeLocal") or a.get("startTimeGMT")
+        rows.append({
+            "garmin_activity_id": activity_id,
+            "activity_date": (start_time_raw or "")[:10] or None,
+            "start_time": start_time_raw,
+            "activity_type": (a.get("activityType") or {}).get("typeKey"),
+            "activity_name": a.get("activityName"),
+            "distance_km": round((a.get("distance") or 0) / 1000, 2),
+            "duration_seconds": int(a.get("duration") or 0),
+            "avg_pace_sec_per_km": parse_pace_sec_per_km(a),
+            "avg_hr": a.get("averageHR"),
+            "max_hr": a.get("maxHR"),
+            "avg_cadence": a.get("averageRunningCadenceInStepsPerMinute"),
+            "elevation_gain_m": a.get("elevationGain"),
+            "calories": a.get("calories"),
+            "raw_json": a,
+        })
+
+    if not rows:
+        print("No activities found in range.")
+        return
+
+    result = sb.table("activities").upsert(rows, on_conflict="garmin_activity_id").execute()
+    print(f"Upserted {len(result.data)} activities.")
+
+
+def sync_daily_metrics(client, sb, start: date, end: date):
+    rows = []
+    for d in daterange(start, end):
+        ds = d.isoformat()
+        metrics = {"metric_date": ds}
 
         try:
-            stats = client.get_stats(day_str)
-            steps = stats.get("totalSteps", 0) or 0
-            calories = stats.get("totalKilocalories", 0) or 0
-            active_mins = (
-                (stats.get("highlyActiveSeconds", 0) or 0) +
-                (stats.get("activeSeconds", 0) or 0)
-            ) // 60
-            resting_hr = stats.get("restingHeartRate", "N/A")
-            avg_hr = stats.get("averageHeartRate", "N/A")
-
-            daily_ws.append_row([day_str, steps, calories, active_mins, resting_hr, avg_hr])
-            print("  Added " + day_str + " - " + str(steps) + " steps, " + str(calories) + " kcal")
+            stats = client.get_stats(ds)
+            metrics["resting_hr"] = stats.get("restingHeartRate")
+            metrics["body_battery_max"] = stats.get("bodyBatteryHighestValue")
+            metrics["body_battery_min"] = stats.get("bodyBatteryLowestValue")
+            metrics["stress_avg"] = stats.get("averageStressLevel")
         except Exception as e:
-            print("  Could not fetch stats for " + day_str + ": " + str(e))
+            print(f"  [{ds}] get_stats failed: {e}")
 
-    # ── Activities ────────────────────────────────────────────────────────────
-    print("\nFetching activities...")
-    try:
-        # Build a set of existing activity keys (date + name + duration)
-        existing_rows = activities_ws.get_all_values()[1:]  # skip header
-        existing_keys = set()
-        for row in existing_rows:
-            if len(row) >= 5:
-                # key = date + activity name + duration
-                key = (row[0] + "|" + row[1] + "|" + row[4]).strip()
-                existing_keys.add(key)
+        try:
+            sleep = client.get_sleep_data(ds)
+            daily_sleep = (sleep or {}).get("dailySleepDTO", {})
+            metrics["sleep_score"] = (daily_sleep.get("sleepScores") or {}).get("overall", {}).get("value")
+            metrics["sleep_duration_min"] = round((daily_sleep.get("sleepTimeSeconds") or 0) / 60)
+        except Exception as e:
+            print(f"  [{ds}] get_sleep_data failed: {e}")
 
-        activities = client.get_activities_by_date(
-            start_date.strftime("%Y-%m-%d"),
-            today.strftime("%Y-%m-%d")
-        )
+        try:
+            hrv = client.get_hrv_data(ds)
+            summary = (hrv or {}).get("hrvSummary", {})
+            metrics["hrv_status"] = summary.get("status")
+            metrics["hrv_last_night_avg"] = summary.get("lastNightAvg")
+        except Exception as e:
+            print(f"  [{ds}] get_hrv_data failed: {e}")
 
-        added = 0
-        skipped = 0
-        for act in activities:
-            act_date = (act.get("startTimeLocal") or "")[:10]
-            act_name = act.get("activityName", "N/A")
-            act_type = (act.get("activityType") or {}).get("typeKey", "N/A")
-            distance = round((act.get("distance") or 0) / 1000, 2)
-            duration = round((act.get("duration") or 0) / 60, 1)
-            calories = act.get("calories", 0) or 0
-            avg_hr   = act.get("averageHR", "N/A")
+        try:
+            readiness = client.get_training_readiness(ds)
+            if isinstance(readiness, list) and readiness:
+                metrics["training_readiness_score"] = readiness[0].get("score")
+        except Exception as e:
+            print(f"  [{ds}] get_training_readiness failed: {e}")
 
-            # Check for duplicate using date + name + duration as unique key
-            key = (act_date + "|" + act_name + "|" + str(duration)).strip()
-            if key in existing_keys:
-                skipped += 1
-                print("  Skipping duplicate: " + act_name + " on " + act_date)
-                continue
+        metrics["raw_json"] = metrics.copy()
+        rows.append(metrics)
+        time.sleep(0.5)  # be gentle with Garmin's rate limits
 
-            activities_ws.append_row([act_date, act_name, act_type, distance, duration, calories, avg_hr])
-            existing_keys.add(key)
-            added += 1
-            print("  Added: " + act_name + " on " + act_date)
+    result = sb.table("daily_metrics").upsert(rows, on_conflict="metric_date").execute()
+    print(f"Upserted {len(result.data)} daily metric rows.")
 
-        print("\n  " + str(added) + " activities added, " + str(skipped) + " duplicates skipped.")
 
-    except Exception as e:
-        print("  Could not fetch activities: " + str(e))
+def main():
+    end = date.today()
+    start_str = os.environ.get("SYNC_START_DATE")
+    start = date.fromisoformat(start_str) if start_str else end - timedelta(days=LOOKBACK_DAYS)
 
-    print("\nSync complete! Check your Google Sheet.")
+    if start > end:
+        sys.exit(f"Start date {start} is in the future.")
+
+    client = get_garmin_client()
+    sb = get_supabase_client()
+
+    sync_activities(client, sb, start, end)
+    sync_daily_metrics(client, sb, start, end)
+    print("\nSync complete.")
+
 
 if __name__ == "__main__":
-    sync()
+    main()

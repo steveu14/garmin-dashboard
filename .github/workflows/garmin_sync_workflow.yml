@@ -1,9 +1,14 @@
 name: Garmin Daily Sync
 
+# NOTE: Garmin's Cloudflare protections are known to be stricter against
+# datacenter/cloud IPs (like GitHub-hosted runners) than home IPs. If this
+# workflow starts failing with 403/429 errors, switch to a self-hosted
+# runner on your own machine/network instead.
+
 on:
   schedule:
     - cron: '0 13,17,0 * * *'
-  workflow_dispatch:        # Allows manual trigger from GitHub
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -19,12 +24,11 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install garminconnect gspread google-auth
-
-      - name: Write Google credentials
-        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+        run: pip install "garminconnect>=0.3.1" curl_cffi ua-generator supabase
 
       - name: Run Garmin sync
         env:
           GARMIN_PASSWORD: ${{ secrets.GARMINPW }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python garmin_sync.py

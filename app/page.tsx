@@ -1,5 +1,6 @@
 import Dashboard from "@/components/Dashboard";
 import { RefreshCw } from "lucide-react";
+import Link from "next/link";
 
 export default function Home() {
   return (
@@ -9,7 +10,10 @@ export default function Home() {
           <span className="w-3 h-3 rounded-full bg-primary inline-block animate-pulse" />
           <h1 className="text-2xl font-bold tracking-tight">Fitness Dashboard</h1>
         </div>
-        <p className="text-sm text-muted-foreground">Synced from Garmin Connect</p>
+        <p className="text-sm text-muted-foreground">
+          Synced from Garmin Connect ·{" "}
+          <Link href="/training" className="underline hover:text-neutral-900">Training Plan</Link>
+        </p>
       </div>
       <Dashboard />
     </main>
