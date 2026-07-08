@@ -99,65 +99,98 @@ function assignActivitiesToWeeks(activities: Activity[], weeks: WeekBucket[]): M
   return byWeek;
 }
 
-/** Rank-match planned runs to actual runs within one week, by descending distance. */
-function matchWeek(week: WeekBucket, weekActivities: Activity[]): MatchedRun[] {
-  const plannedSorted = [...week.plannedRuns].sort((a, b) => (b.planned_km ?? 0) - (a.planned_km ?? 0));
-  const actualSorted = [...weekActivities].sort((a, b) => b.distance_km - a.distance_km);
+const PACE_WEIGHT_KM_PER_MIN = 2; // 1 min/km pace deviation costs as much as 2km of distance deviation
 
-  const results: MatchedRun[] = [];
-  const pairCount = Math.max(plannedSorted.length, actualSorted.length);
-
-  for (let i = 0; i < pairCount; i++) {
-    const planned = plannedSorted[i];
-    const actual = actualSorted[i];
-
-    if (planned && actual) {
-      results.push({
-        week_number: week.week_number,
-        phase: week.phase,
-        workout_type: planned.workout_type,
-        badge: planned.badge,
-        planned_km: planned.planned_km,
-        pace_target: planned.pace_target,
-        instructions: planned.instructions,
-        actual_km: Math.round(actual.distance_km * 100) / 100,
-        avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
-        avg_hr: actual.avg_hr,
-        activity_date: actual.activity_date,
-        activity_name: actual.activity_name,
-      });
-    } else if (planned && !actual) {
-      results.push({
-        week_number: week.week_number,
-        phase: week.phase,
-        workout_type: planned.workout_type,
-        badge: planned.badge,
-        planned_km: planned.planned_km,
-        pace_target: planned.pace_target,
-        instructions: planned.instructions,
-        actual_km: null,
-        avg_pace_sec_per_km: null,
-        avg_hr: null,
-        activity_date: null,
-        activity_name: null,
-      });
-    } else if (!planned && actual) {
-      results.push({
-        week_number: week.week_number,
-        phase: week.phase,
-        workout_type: "unplanned",
-        badge: "Extra run",
-        planned_km: null,
-        pace_target: null,
-        instructions: null,
-        actual_km: Math.round(actual.distance_km * 100) / 100,
-        avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
-        avg_hr: actual.avg_hr,
-        activity_date: actual.activity_date,
-        activity_name: actual.activity_name,
-      });
-    }
+/** Cost of pairing a planned workout with an actual run: lower = better match.
+ * Combines distance closeness and pace closeness (vs the planned pace target),
+ * so e.g. an 8km run at easy pace won't get matched to a 19km long run just
+ * because it's the only run logged that week. */
+function matchCost(planned: PlannedWorkout, actual: Activity): number {
+  const distDiff = Math.abs((planned.planned_km ?? 0) - actual.distance_km);
+  let paceDiff = 0;
+  const range = parsePaceRange(planned.pace_target);
+  if (range && actual.avg_pace_sec_per_km) {
+    const midSec = (range.minSec + range.maxSec) / 2;
+    paceDiff = Math.abs(actual.avg_pace_sec_per_km - midSec) / 60; // minutes/km deviation
   }
+  return distDiff + paceDiff * PACE_WEIGHT_KM_PER_MIN;
+}
+
+function matchedRow(week: WeekBucket, planned: PlannedWorkout, actual: Activity): MatchedRun {
+  return {
+    week_number: week.week_number,
+    phase: week.phase,
+    workout_type: planned.workout_type,
+    badge: planned.badge,
+    planned_km: planned.planned_km,
+    pace_target: planned.pace_target,
+    instructions: planned.instructions,
+    actual_km: Math.round(actual.distance_km * 100) / 100,
+    avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
+    avg_hr: actual.avg_hr,
+    activity_date: actual.activity_date,
+    activity_name: actual.activity_name,
+  };
+}
+
+function missedRow(week: WeekBucket, planned: PlannedWorkout): MatchedRun {
+  return {
+    week_number: week.week_number,
+    phase: week.phase,
+    workout_type: planned.workout_type,
+    badge: planned.badge,
+    planned_km: planned.planned_km,
+    pace_target: planned.pace_target,
+    instructions: planned.instructions,
+    actual_km: null,
+    avg_pace_sec_per_km: null,
+    avg_hr: null,
+    activity_date: null,
+    activity_name: null,
+  };
+}
+
+function extraRow(week: WeekBucket, actual: Activity): MatchedRun {
+  return {
+    week_number: week.week_number,
+    phase: week.phase,
+    workout_type: "unplanned",
+    badge: "Extra run",
+    planned_km: null,
+    pace_target: null,
+    instructions: null,
+    actual_km: Math.round(actual.distance_km * 100) / 100,
+    avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
+    avg_hr: actual.avg_hr,
+    activity_date: actual.activity_date,
+    activity_name: actual.activity_name,
+  };
+}
+
+/** Greedy nearest-match: repeatedly pair whichever remaining planned/actual
+ * run combo has the lowest cost, until one side runs out. This handles
+ * partial weeks correctly -- a single 8km run won't get force-matched to a
+ * 19km long run just because nothing else is logged yet. */
+function matchWeek(week: WeekBucket, weekActivities: Activity[]): MatchedRun[] {
+  const remainingPlanned = [...week.plannedRuns];
+  const remainingActual = [...weekActivities];
+  const results: MatchedRun[] = [];
+
+  while (remainingPlanned.length && remainingActual.length) {
+    let bestPi = -1, bestAi = -1, bestCost = Infinity;
+    for (let pi = 0; pi < remainingPlanned.length; pi++) {
+      for (let ai = 0; ai < remainingActual.length; ai++) {
+        const cost = matchCost(remainingPlanned[pi], remainingActual[ai]);
+        if (cost < bestCost) { bestCost = cost; bestPi = pi; bestAi = ai; }
+      }
+    }
+    results.push(matchedRow(week, remainingPlanned[bestPi], remainingActual[bestAi]));
+    remainingPlanned.splice(bestPi, 1);
+    remainingActual.splice(bestAi, 1);
+  }
+
+  for (const planned of remainingPlanned) results.push(missedRow(week, planned));
+  for (const actual of remainingActual) results.push(extraRow(week, actual));
 
   return results;
 }
@@ -169,7 +202,28 @@ export function buildMatchedRuns(plan: PlannedWorkout[], activities: Activity[])
   return weeks.flatMap((w) => matchWeek(w, activitiesByWeek.get(w.week_number) ?? []));
 }
 
-/** Parse the first "m:ss-m:ss" range found in a pace_target string, in seconds/km. */
+/** Compact text summary of training data, sized for an LLM context window. */
+export function buildCoachContext(rollups: WeeklyRollup[], runs: MatchedRun[]): string {
+  const rollupLines = rollups
+    .map((r) => `Week ${r.week_number} (${r.phase}): ${r.actual_km}/${r.planned_km}km actual/planned, ${r.adherence_pct}% adherence, ${r.runs_missed} run(s) missed`)
+    .join("\n");
+
+  const runLines = runs
+    .slice()
+    .sort((a, b) => a.week_number - b.week_number)
+    .map((r) => {
+      const dVerdict = distanceVerdict(r);
+      const pVerdict = paceVerdict(r);
+      const dateStr = r.activity_date ?? "not run";
+      const paceStr = formatPace(r.avg_pace_sec_per_km);
+      return `Wk${r.week_number} ${r.badge} (planned ${r.planned_km ?? "-"}km @ ${r.pace_target ?? "n/a"}): ${dateStr}, actual ${r.actual_km ?? "-"}km @ ${paceStr}, HR ${r.avg_hr ?? "-"}, distance:${dVerdict}, pace:${pVerdict}`;
+    })
+    .join("\n");
+
+  return `WEEKLY SUMMARY:\n${rollupLines}\n\nRUN-BY-RUN DETAIL:\n${runLines}`;
+}
+
+
 export function parsePaceRange(paceTarget: string | null): { minSec: number; maxSec: number } | null {
   if (!paceTarget) return null;
   const match = paceTarget.match(/(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/);
