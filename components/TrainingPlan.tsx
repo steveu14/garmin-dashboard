@@ -10,8 +10,8 @@ import { supabase } from "@/lib/supabase";
 import {
   PlannedWorkout,
   Activity,
-  MergedDay,
-  mergeDay,
+  MatchedRun,
+  buildMatchedRuns,
   buildFeedback,
   buildWeeklyRollups,
   formatPace,
@@ -22,22 +22,21 @@ function severityBadgeClass(severity: FeedbackSeverity) {
   switch (severity) {
     case "good":
       return "bg-emerald-100 text-emerald-700 border-transparent";
+    case "info":
+      return "bg-blue-100 text-blue-700 border-transparent";
     case "warning":
       return "bg-amber-100 text-amber-700 border-transparent";
     case "missed":
       return "bg-red-100 text-red-700 border-transparent";
-    case "rest":
-    default:
-      return "bg-neutral-100 text-neutral-400 border-transparent";
   }
 }
 
 function severityLabel(severity: FeedbackSeverity) {
   switch (severity) {
     case "good": return "On track";
+    case "info": return "Extra";
     case "warning": return "Review";
     case "missed": return "Missed";
-    case "rest": return "Rest";
   }
 }
 
@@ -80,28 +79,30 @@ export default function TrainingPlan() {
 
   useEffect(() => { load(); }, [load]);
 
-  const mergedDays: MergedDay[] = useMemo(() => {
-    const byDate = new Map<string, Activity[]>();
-    for (const a of activities) {
-      const key = a.activity_date;
-      if (!byDate.has(key)) byDate.set(key, []);
-      byDate.get(key)!.push(a);
-    }
-    return plan.map((p) => mergeDay(p, byDate.get(p.workout_date) ?? []));
-  }, [plan, activities]);
-
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const visibleDays = useMemo(
-    () => (showFuture ? mergedDays : mergedDays.filter((d) => d.workout_date <= todayStr)),
-    [mergedDays, showFuture, todayStr]
+  const matchedRuns: MatchedRun[] = useMemo(
+    () => buildMatchedRuns(plan, activities),
+    [plan, activities]
   );
 
-  const weeklyRollups = useMemo(() => buildWeeklyRollups(visibleDays), [visibleDays]);
-  const currentWeek = weeklyRollups[weeklyRollups.length - 1];
+  const todayStr = new Date().toISOString().slice(0, 10);
+  // "up to today" = everything through the current week (weeks are matched as a
+  // whole, so partial-week filtering by exact day doesn't make sense here).
+  const currentWeekNumber = useMemo(() => {
+    const pastWeeks = plan.filter((p) => p.workout_date <= todayStr).map((p) => p.week_number);
+    return pastWeeks.length ? Math.max(...pastWeeks) : 0;
+  }, [plan, todayStr]);
 
-  const missedCount = visibleDays.filter((d) => d.planned_km && !d.actual_km).length;
-  const reviewCount = visibleDays.filter((d) => {
-    const { severity } = buildFeedback(d);
+  const visibleRuns = useMemo(
+    () => (showFuture ? matchedRuns : matchedRuns.filter((r) => r.week_number <= currentWeekNumber)),
+    [matchedRuns, showFuture, currentWeekNumber]
+  );
+
+  const weeklyRollups = useMemo(() => buildWeeklyRollups(visibleRuns), [visibleRuns]);
+  const currentWeek = weeklyRollups.find((w) => w.week_number === currentWeekNumber) ?? weeklyRollups[weeklyRollups.length - 1];
+
+  const missedCount = visibleRuns.filter((r) => r.planned_km && !r.actual_km).length;
+  const reviewCount = visibleRuns.filter((r) => {
+    const { severity } = buildFeedback(r);
     return severity === "warning";
   }).length;
 
@@ -204,42 +205,51 @@ export default function TrainingPlan() {
         </CardContent>
       </Card>
 
-      {/* Day-by-day plan vs actual */}
+      {/* Plan vs actual, matched within each week */}
       <Card>
         <CardHeader>
           <CardTitle className="text-sm font-semibold">Plan vs Actual</CardTitle>
+          <p className="text-xs text-neutral-400">
+            Runs are matched to plan by distance rank within each week, not by exact day — e.g. the week's longest run is treated as the long run, regardless of which day it fell on.
+          </p>
         </CardHeader>
         <CardContent className="p-0">
-          {visibleDays.length === 0
+          {visibleRuns.length === 0
             ? <p className="text-neutral-400 text-sm px-6 pb-6">No plan data yet — seed planned_workouts in Supabase.</p>
             : <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-t border-neutral-100">
-                      {["Date","Wk","Workout","Planned","Actual","Pace","Avg HR","Status","Coach note"].map(h => (
+                      {["Ran on","Wk","Workout","Planned","Actual","Pace","Avg HR","Status","Coach note"].map(h => (
                         <th key={h} className="text-left text-xs font-semibold text-neutral-400 uppercase tracking-wide px-5 py-3 whitespace-nowrap bg-neutral-50">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleDays.slice().reverse().map((d) => {
-                      const { severity, message } = buildFeedback(d);
-                      return (
-                        <tr key={d.workout_date} className="border-t border-neutral-100 hover:bg-neutral-50 transition-colors align-top">
-                          <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{fmtDate(d.workout_date)}</td>
-                          <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{d.week_number}</td>
-                          <td className="px-5 py-3 font-semibold text-neutral-900 whitespace-nowrap">{d.badge}</td>
-                          <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{d.planned_km ? `${d.planned_km}km` : "—"}</td>
-                          <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{d.actual_km ? `${d.actual_km}km` : "—"}</td>
-                          <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{formatPace(d.avg_pace_sec_per_km)}</td>
-                          <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{d.avg_hr ?? "—"}</td>
-                          <td className="px-5 py-3 whitespace-nowrap">
-                            <Badge className={severityBadgeClass(severity)}>{severityLabel(severity)}</Badge>
-                          </td>
-                          <td className="px-5 py-3 text-neutral-600 text-xs max-w-xs">{message}</td>
-                        </tr>
-                      );
-                    })}
+                    {visibleRuns
+                      .slice()
+                      .sort((a, b) => {
+                        if (b.week_number !== a.week_number) return b.week_number - a.week_number;
+                        return (b.planned_km ?? -1) - (a.planned_km ?? -1);
+                      })
+                      .map((r, i) => {
+                        const { severity, message } = buildFeedback(r);
+                        return (
+                          <tr key={`${r.week_number}-${r.badge}-${i}`} className="border-t border-neutral-100 hover:bg-neutral-50 transition-colors align-top">
+                            <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{r.activity_date ? fmtDate(r.activity_date) : "—"}</td>
+                            <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{r.week_number}</td>
+                            <td className="px-5 py-3 font-semibold text-neutral-900 whitespace-nowrap">{r.badge}</td>
+                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.planned_km ? `${r.planned_km}km` : "—"}</td>
+                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.actual_km ? `${r.actual_km}km` : "—"}</td>
+                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{formatPace(r.avg_pace_sec_per_km)}</td>
+                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.avg_hr ?? "—"}</td>
+                            <td className="px-5 py-3 whitespace-nowrap">
+                              <Badge className={severityBadgeClass(severity)}>{severityLabel(severity)}</Badge>
+                            </td>
+                            <td className="px-5 py-3 text-neutral-600 text-xs max-w-xs">{message}</td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                 </table>
               </div>

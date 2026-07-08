@@ -1,5 +1,13 @@
-// Coach-style analysis: matches planned workouts to actual Garmin activities
-// and flags distance/pace/HR deviations.
+// Coach-style analysis: matches actual Garmin runs to planned workouts
+// WITHIN THE SAME WEEK, rather than requiring an exact date match.
+//
+// Rationale: the plan assigns workout types to specific days (e.g. "long run
+// on Sunday"), but real training weeks shift around. So each week, planned
+// runs (excluding rest days) are ranked by distance, actual runs that week
+// are ranked by distance, and they're paired by rank -- the longest run of
+// the week is assumed to be the long run, the shortest are the easy runs,
+// etc. This is a heuristic, not a guarantee, but distance rank is a strong
+// proxy for workout intent within a single training week.
 //
 // Numbers used here that come directly from Steven's own plan text (not
 // invented): the 145 bpm easy-run ceiling ("HR <145 bpm" appears verbatim in
@@ -29,44 +37,136 @@ export type Activity = {
   avg_hr: number | null;
 };
 
-export type MergedDay = PlannedWorkout & {
+/** One matched (or unmatched) run for a given week. */
+export type MatchedRun = {
+  week_number: number;
+  phase: string;
+  workout_type: string; // 'unplanned' for extra runs with no plan slot left
+  badge: string;
+  planned_km: number | null;
+  pace_target: string | null;
+  instructions: string | null;
   actual_km: number | null;
   avg_pace_sec_per_km: number | null;
   avg_hr: number | null;
-  matched_activity_name: string | null;
-  extra_activities_count: number; // additional activities logged same day
+  activity_date: string | null; // the date the run actually happened
+  activity_name: string | null;
 };
 
 const EASY_HR_CEILING = 145; // from the plan's own "HR <145 bpm" instruction
 const LT_HR_REFERENCE = 179; // Steven's known lactate-threshold HR
 const EASY_LIKE_TYPES = new Set(["easy", "medium", "long", "recovery"]);
+const MIN_RUN_DISTANCE_KM = 0.3; // filters out e.g. strength sessions logged with ~0 distance
 
-/** Merge one day of plan with the best-matching activity(ies) for that date. */
-export function mergeDay(plan: PlannedWorkout, activitiesForDay: Activity[]): MergedDay {
-  if (activitiesForDay.length === 0) {
-    return {
-      ...plan,
-      actual_km: null,
-      avg_pace_sec_per_km: null,
-      avg_hr: null,
-      matched_activity_name: null,
-      extra_activities_count: 0,
-    };
+type WeekBucket = {
+  week_number: number;
+  phase: string;
+  start: string;
+  end: string;
+  plannedRuns: PlannedWorkout[]; // rest days excluded
+};
+
+function buildWeekBuckets(plan: PlannedWorkout[]): WeekBucket[] {
+  const byWeek = new Map<number, PlannedWorkout[]>();
+  for (const p of plan) {
+    if (!byWeek.has(p.week_number)) byWeek.set(p.week_number, []);
+    byWeek.get(p.week_number)!.push(p);
   }
 
-  // Assume the longest activity that day is "the" run; sum distance across all.
-  const sorted = [...activitiesForDay].sort((a, b) => b.distance_km - a.distance_km);
-  const primary = sorted[0];
-  const totalKm = activitiesForDay.reduce((s, a) => s + (a.distance_km || 0), 0);
+  const buckets: WeekBucket[] = [];
+  for (const [week, days] of [...byWeek.entries()].sort((a, b) => a[0] - b[0])) {
+    const dates = days.map((d) => d.workout_date).sort();
+    buckets.push({
+      week_number: week,
+      phase: days[0].phase,
+      start: dates[0],
+      end: dates[dates.length - 1],
+      plannedRuns: days.filter((d) => d.planned_km !== null),
+    });
+  }
+  return buckets;
+}
 
-  return {
-    ...plan,
-    actual_km: Math.round(totalKm * 100) / 100,
-    avg_pace_sec_per_km: primary.avg_pace_sec_per_km,
-    avg_hr: primary.avg_hr,
-    matched_activity_name: primary.activity_name,
-    extra_activities_count: activitiesForDay.length - 1,
-  };
+function assignActivitiesToWeeks(activities: Activity[], weeks: WeekBucket[]): Map<number, Activity[]> {
+  const byWeek = new Map<number, Activity[]>();
+  for (const w of weeks) byWeek.set(w.week_number, []);
+
+  for (const a of activities) {
+    if (!a.distance_km || a.distance_km < MIN_RUN_DISTANCE_KM) continue; // skip non-run/near-zero entries
+    const week = weeks.find((w) => a.activity_date >= w.start && a.activity_date <= w.end);
+    if (week) byWeek.get(week.week_number)!.push(a);
+  }
+  return byWeek;
+}
+
+/** Rank-match planned runs to actual runs within one week, by descending distance. */
+function matchWeek(week: WeekBucket, weekActivities: Activity[]): MatchedRun[] {
+  const plannedSorted = [...week.plannedRuns].sort((a, b) => (b.planned_km ?? 0) - (a.planned_km ?? 0));
+  const actualSorted = [...weekActivities].sort((a, b) => b.distance_km - a.distance_km);
+
+  const results: MatchedRun[] = [];
+  const pairCount = Math.max(plannedSorted.length, actualSorted.length);
+
+  for (let i = 0; i < pairCount; i++) {
+    const planned = plannedSorted[i];
+    const actual = actualSorted[i];
+
+    if (planned && actual) {
+      results.push({
+        week_number: week.week_number,
+        phase: week.phase,
+        workout_type: planned.workout_type,
+        badge: planned.badge,
+        planned_km: planned.planned_km,
+        pace_target: planned.pace_target,
+        instructions: planned.instructions,
+        actual_km: Math.round(actual.distance_km * 100) / 100,
+        avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
+        avg_hr: actual.avg_hr,
+        activity_date: actual.activity_date,
+        activity_name: actual.activity_name,
+      });
+    } else if (planned && !actual) {
+      results.push({
+        week_number: week.week_number,
+        phase: week.phase,
+        workout_type: planned.workout_type,
+        badge: planned.badge,
+        planned_km: planned.planned_km,
+        pace_target: planned.pace_target,
+        instructions: planned.instructions,
+        actual_km: null,
+        avg_pace_sec_per_km: null,
+        avg_hr: null,
+        activity_date: null,
+        activity_name: null,
+      });
+    } else if (!planned && actual) {
+      results.push({
+        week_number: week.week_number,
+        phase: week.phase,
+        workout_type: "unplanned",
+        badge: "Extra run",
+        planned_km: null,
+        pace_target: null,
+        instructions: null,
+        actual_km: Math.round(actual.distance_km * 100) / 100,
+        avg_pace_sec_per_km: actual.avg_pace_sec_per_km,
+        avg_hr: actual.avg_hr,
+        activity_date: actual.activity_date,
+        activity_name: actual.activity_name,
+      });
+    }
+  }
+
+  return results;
+}
+
+/** Build the full set of matched runs across all weeks. */
+export function buildMatchedRuns(plan: PlannedWorkout[], activities: Activity[]): MatchedRun[] {
+  const weeks = buildWeekBuckets(plan);
+  const activitiesByWeek = assignActivitiesToWeeks(activities, weeks);
+  return weeks.flatMap((w) => matchWeek(w, activitiesByWeek.get(w.week_number) ?? []));
 }
 
 /** Parse the first "m:ss-m:ss" range found in a pace_target string, in seconds/km. */
@@ -86,12 +186,13 @@ export function formatPace(secPerKm: number | null): string {
   return `${m}:${s.toString().padStart(2, "0")}/km`;
 }
 
-export type DistanceVerdict = "rest" | "missed" | "short" | "on_target" | "long";
+export type DistanceVerdict = "missed" | "short" | "on_target" | "long" | "extra";
 
-export function distanceVerdict(day: MergedDay): DistanceVerdict {
-  if (day.planned_km === null) return "rest";
-  if (!day.actual_km) return "missed";
-  const pct = (day.actual_km / day.planned_km) * 100;
+export function distanceVerdict(run: MatchedRun): DistanceVerdict {
+  if (run.workout_type === "unplanned") return "extra";
+  if (!run.actual_km) return "missed";
+  if (!run.planned_km) return "on_target"; // shouldn't happen, but guard
+  const pct = (run.actual_km / run.planned_km) * 100;
   if (pct < 90) return "short";
   if (pct > 110) return "long";
   return "on_target";
@@ -99,57 +200,64 @@ export function distanceVerdict(day: MergedDay): DistanceVerdict {
 
 export type PaceVerdict = "n/a" | "no_data" | "faster" | "on_pace" | "slower";
 
-export function paceVerdict(day: MergedDay): PaceVerdict {
-  const range = parsePaceRange(day.pace_target);
+export function paceVerdict(run: MatchedRun): PaceVerdict {
+  const range = parsePaceRange(run.pace_target);
   if (!range) return "n/a";
-  if (!day.avg_pace_sec_per_km) return "no_data";
+  if (!run.avg_pace_sec_per_km) return "no_data";
   const tolerance = 8; // seconds/km buffer either side
-  if (day.avg_pace_sec_per_km < range.minSec - tolerance) return "faster";
-  if (day.avg_pace_sec_per_km > range.maxSec + tolerance) return "slower";
+  if (run.avg_pace_sec_per_km < range.minSec - tolerance) return "faster";
+  if (run.avg_pace_sec_per_km > range.maxSec + tolerance) return "slower";
   return "on_pace";
 }
 
-export function hrNote(day: MergedDay): string | null {
-  if (!day.avg_hr) return null;
-  if (EASY_LIKE_TYPES.has(day.workout_type) && day.avg_hr > EASY_HR_CEILING) {
-    return `HR averaged ${day.avg_hr} bpm — above the ${EASY_HR_CEILING} bpm easy-day ceiling. Likely ran too hard for the intended effort.`;
+export function hrNote(run: MatchedRun): string | null {
+  if (!run.avg_hr) return null;
+  if (EASY_LIKE_TYPES.has(run.workout_type) && run.avg_hr > EASY_HR_CEILING) {
+    return `HR averaged ${run.avg_hr} bpm — above the ${EASY_HR_CEILING} bpm easy-day ceiling. Likely ran too hard for the intended effort.`;
   }
-  if ((day.workout_type === "tempo" || day.workout_type === "pace") && day.avg_hr > LT_HR_REFERENCE) {
-    return `HR averaged ${day.avg_hr} bpm — above your LT reference of ${LT_HR_REFERENCE} bpm. Effort may have drifted past "comfortably hard."`;
+  if ((run.workout_type === "tempo" || run.workout_type === "pace") && run.avg_hr > LT_HR_REFERENCE) {
+    return `HR averaged ${run.avg_hr} bpm — above your LT reference of ${LT_HR_REFERENCE} bpm. Effort may have drifted past "comfortably hard."`;
   }
   return null;
 }
 
-export type FeedbackSeverity = "good" | "info" | "warning" | "missed" | "rest";
+export type FeedbackSeverity = "good" | "info" | "warning" | "missed";
 
-export function buildFeedback(day: MergedDay): { severity: FeedbackSeverity; message: string } {
-  const dVerdict = distanceVerdict(day);
-  const pVerdict = paceVerdict(day);
-  const hr = hrNote(day);
+export function buildFeedback(run: MatchedRun): { severity: FeedbackSeverity; message: string } {
+  const dVerdict = distanceVerdict(run);
+  const pVerdict = paceVerdict(run);
+  const hr = hrNote(run);
 
-  if (dVerdict === "rest") {
-    return { severity: "rest", message: "Rest day." };
-  }
   if (dVerdict === "missed") {
-    return { severity: "missed", message: "No matching activity found — run appears to have been missed." };
+    return {
+      severity: "missed",
+      message: `No run matched this ${run.badge.toLowerCase()} (${run.planned_km}km planned) anywhere in week ${run.week_number} — looks like it was skipped.`,
+    };
+  }
+
+  if (dVerdict === "extra") {
+    return {
+      severity: "info",
+      message: `Unplanned run of ${run.actual_km}km on ${run.activity_date} — beyond what week ${run.week_number}'s plan called for. Bonus mileage, or the week got rearranged.`,
+    };
   }
 
   const parts: string[] = [];
 
   if (dVerdict === "short") {
-    parts.push(`Came in short: ${day.actual_km}km of ${day.planned_km}km planned.`);
+    parts.push(`Came in short: ${run.actual_km}km of ${run.planned_km}km planned (matched by distance rank within week ${run.week_number}).`);
   } else if (dVerdict === "long") {
-    parts.push(`Ran long: ${day.actual_km}km vs ${day.planned_km}km planned.`);
+    parts.push(`Ran long: ${run.actual_km}km vs ${run.planned_km}km planned.`);
   } else {
-    parts.push(`Distance on target (${day.actual_km}km vs ${day.planned_km}km planned).`);
+    parts.push(`Distance on target (${run.actual_km}km vs ${run.planned_km}km planned).`);
   }
 
   if (pVerdict === "faster") {
-    parts.push(`Pace was faster than the ${day.pace_target} target — fine occasionally, but watch for creeping intensity on what should be easier days.`);
+    parts.push(`Pace was faster than the ${run.pace_target} target — fine occasionally, but watch for creeping intensity on what should be easier days.`);
   } else if (pVerdict === "slower") {
-    parts.push(`Pace was slower than the ${day.pace_target} target.`);
+    parts.push(`Pace was slower than the ${run.pace_target} target.`);
   } else if (pVerdict === "on_pace") {
-    parts.push(`Pace matched target (${day.pace_target}).`);
+    parts.push(`Pace matched target (${run.pace_target}).`);
   }
 
   if (hr) parts.push(hr);
@@ -157,7 +265,7 @@ export function buildFeedback(day: MergedDay): { severity: FeedbackSeverity; mes
   let severity: FeedbackSeverity = "good";
   if (dVerdict === "short" || pVerdict === "slower") severity = "warning";
   if (hr) severity = "warning";
-  if (dVerdict === "long" && day.workout_type !== "long") severity = "warning";
+  if (dVerdict === "long" && run.workout_type !== "long") severity = "warning";
 
   return { severity, message: parts.join(" ") };
 }
@@ -168,28 +276,28 @@ export type WeeklyRollup = {
   planned_km: number;
   actual_km: number;
   adherence_pct: number;
-  days_missed: number;
+  runs_missed: number;
 };
 
-export function buildWeeklyRollups(days: MergedDay[]): WeeklyRollup[] {
-  const byWeek = new Map<number, MergedDay[]>();
-  for (const d of days) {
-    if (!byWeek.has(d.week_number)) byWeek.set(d.week_number, []);
-    byWeek.get(d.week_number)!.push(d);
+export function buildWeeklyRollups(runs: MatchedRun[]): WeeklyRollup[] {
+  const byWeek = new Map<number, MatchedRun[]>();
+  for (const r of runs) {
+    if (!byWeek.has(r.week_number)) byWeek.set(r.week_number, []);
+    byWeek.get(r.week_number)!.push(r);
   }
 
   const rollups: WeeklyRollup[] = [];
-  for (const [week, weekDays] of [...byWeek.entries()].sort((a, b) => a[0] - b[0])) {
-    const planned = weekDays.reduce((s, d) => s + (d.planned_km || 0), 0);
-    const actual = weekDays.reduce((s, d) => s + (d.actual_km || 0), 0);
-    const missed = weekDays.filter((d) => d.planned_km && !d.actual_km).length;
+  for (const [week, weekRuns] of [...byWeek.entries()].sort((a, b) => a[0] - b[0])) {
+    const planned = weekRuns.reduce((s, r) => s + (r.planned_km || 0), 0);
+    const actual = weekRuns.reduce((s, r) => s + (r.actual_km || 0), 0);
+    const missed = weekRuns.filter((r) => r.planned_km && !r.actual_km).length;
     rollups.push({
       week_number: week,
-      phase: weekDays[0].phase,
+      phase: weekRuns[0].phase,
       planned_km: Math.round(planned * 10) / 10,
       actual_km: Math.round(actual * 10) / 10,
       adherence_pct: planned > 0 ? Math.round((actual / planned) * 1000) / 10 : 0,
-      days_missed: missed,
+      runs_missed: missed,
     });
   }
   return rollups;
