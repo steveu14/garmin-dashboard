@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { RefreshCw, TrendingUp, TrendingDown, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
+import CoachChat from "@/components/CoachChat";
 import {
   PlannedWorkout,
   Activity,
@@ -220,7 +221,7 @@ export default function TrainingPlan() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-t border-neutral-100">
-                      {["Ran on","Wk","Workout","Planned","Actual","Pace","Avg HR","Status","Coach note"].map(h => (
+                      {["Ran on","Wk","Workout","Planned","Actual","Pace","Avg HR","Status"].map(h => (
                         <th key={h} className="text-left text-xs font-semibold text-neutral-400 uppercase tracking-wide px-5 py-3 whitespace-nowrap bg-neutral-50">{h}</th>
                       ))}
                     </tr>
@@ -233,7 +234,7 @@ export default function TrainingPlan() {
                         return (b.planned_km ?? -1) - (a.planned_km ?? -1);
                       })
                       .map((r, i) => {
-                        const { severity, message } = buildFeedback(r);
+                        const { severity } = buildFeedback(r);
                         return (
                           <tr key={`${r.week_number}-${r.badge}-${i}`} className="border-t border-neutral-100 hover:bg-neutral-50 transition-colors align-top">
                             <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{r.activity_date ? fmtDate(r.activity_date) : "—"}</td>
@@ -246,7 +247,6 @@ export default function TrainingPlan() {
                             <td className="px-5 py-3 whitespace-nowrap">
                               <Badge className={severityBadgeClass(severity)}>{severityLabel(severity)}</Badge>
                             </td>
-                            <td className="px-5 py-3 text-neutral-600 text-xs max-w-xs">{message}</td>
                           </tr>
                         );
                       })}
@@ -256,6 +256,8 @@ export default function TrainingPlan() {
           }
         </CardContent>
       </Card>
+
+      <CoachChat rollups={weeklyRollups} runs={visibleRuns} />
     </div>
   );
 }
