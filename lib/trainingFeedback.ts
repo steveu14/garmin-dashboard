@@ -27,6 +27,16 @@ export type PlannedWorkout = {
   instructions: string | null;
 };
 
+export type Split = {
+  km: number;
+  distance_m: number | null;
+  duration_s: number | null;
+  pace_sec_per_km: number | null;
+  avg_hr: number | null;
+  max_hr: number | null;
+  elevation_gain_m: number | null;
+};
+
 export type Activity = {
   activity_date: string;
   activity_name: string | null;
@@ -35,6 +45,7 @@ export type Activity = {
   duration_seconds: number;
   avg_pace_sec_per_km: number | null;
   avg_hr: number | null;
+  splits?: Split[] | null;
 };
 
 /** One matched (or unmatched) run for a given week. */
@@ -51,7 +62,36 @@ export type MatchedRun = {
   avg_hr: number | null;
   activity_date: string | null; // the date the run actually happened
   activity_name: string | null;
+  // Derived from splits (if available) -- not raw per-km data, just the
+  // two signals that actually matter for coaching feedback.
+  paceFadeSecPerKm: number | null; // positive = slowed in 2nd half, negative = negative split
+  hrDriftBpm: number | null; // positive = HR climbed in 2nd half (cardiac drift/fatigue)
 };
+
+/** Compares first-half vs second-half splits to get pace fade and HR drift.
+ * These two numbers are far more useful for coaching than raw per-km data,
+ * and far cheaper to include in the AI coach's context. */
+function computeSplitSignals(splits: Split[] | null | undefined): { paceFadeSecPerKm: number | null; hrDriftBpm: number | null } {
+  if (!splits || splits.length < 4) return { paceFadeSecPerKm: null, hrDriftBpm: null }; // need enough splits for a meaningful half/half comparison
+  const mid = Math.floor(splits.length / 2);
+  const firstHalf = splits.slice(0, mid);
+  const secondHalf = splits.slice(mid);
+
+  const avg = (vals: (number | null)[]) => {
+    const nums = vals.filter((v): v is number => v !== null);
+    return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+  };
+
+  const paceFirst = avg(firstHalf.map((s) => s.pace_sec_per_km));
+  const paceSecond = avg(secondHalf.map((s) => s.pace_sec_per_km));
+  const hrFirst = avg(firstHalf.map((s) => s.avg_hr));
+  const hrSecond = avg(secondHalf.map((s) => s.avg_hr));
+
+  return {
+    paceFadeSecPerKm: paceFirst !== null && paceSecond !== null ? Math.round(paceSecond - paceFirst) : null,
+    hrDriftBpm: hrFirst !== null && hrSecond !== null ? Math.round(hrSecond - hrFirst) : null,
+  };
+}
 
 const EASY_HR_CEILING = 145; // from the plan's own "HR <145 bpm" instruction
 const LT_HR_REFERENCE = 179; // Steven's known lactate-threshold HR
@@ -117,6 +157,7 @@ function matchCost(planned: PlannedWorkout, actual: Activity): number {
 }
 
 function matchedRow(week: WeekBucket, planned: PlannedWorkout, actual: Activity): MatchedRun {
+  const { paceFadeSecPerKm, hrDriftBpm } = computeSplitSignals(actual.splits);
   return {
     week_number: week.week_number,
     phase: week.phase,
@@ -130,6 +171,8 @@ function matchedRow(week: WeekBucket, planned: PlannedWorkout, actual: Activity)
     avg_hr: actual.avg_hr,
     activity_date: actual.activity_date,
     activity_name: actual.activity_name,
+    paceFadeSecPerKm,
+    hrDriftBpm,
   };
 }
 
@@ -147,10 +190,13 @@ function missedRow(week: WeekBucket, planned: PlannedWorkout): MatchedRun {
     avg_hr: null,
     activity_date: null,
     activity_name: null,
+    paceFadeSecPerKm: null,
+    hrDriftBpm: null,
   };
 }
 
 function extraRow(week: WeekBucket, actual: Activity): MatchedRun {
+  const { paceFadeSecPerKm, hrDriftBpm } = computeSplitSignals(actual.splits);
   return {
     week_number: week.week_number,
     phase: week.phase,
@@ -164,6 +210,8 @@ function extraRow(week: WeekBucket, actual: Activity): MatchedRun {
     avg_hr: actual.avg_hr,
     activity_date: actual.activity_date,
     activity_name: actual.activity_name,
+    paceFadeSecPerKm,
+    hrDriftBpm,
   };
 }
 
@@ -216,11 +264,95 @@ export function buildCoachContext(rollups: WeeklyRollup[], runs: MatchedRun[]): 
       const pVerdict = paceVerdict(r);
       const dateStr = r.activity_date ?? "not run";
       const paceStr = formatPace(r.avg_pace_sec_per_km);
-      return `Wk${r.week_number} ${r.badge} (planned ${r.planned_km ?? "-"}km @ ${r.pace_target ?? "n/a"}): ${dateStr}, actual ${r.actual_km ?? "-"}km @ ${paceStr}, HR ${r.avg_hr ?? "-"}, distance:${dVerdict}, pace:${pVerdict}`;
+      const splitNote = r.paceFadeSecPerKm !== null
+        ? `, splits: ${r.paceFadeSecPerKm > 0 ? "+" : ""}${r.paceFadeSecPerKm}s/km fade 2nd half, HR drift ${r.hrDriftBpm !== null ? (r.hrDriftBpm > 0 ? "+" : "") + r.hrDriftBpm + "bpm" : "n/a"}`
+        : "";
+      return `Wk${r.week_number} ${r.badge} (planned ${r.planned_km ?? "-"}km @ ${r.pace_target ?? "n/a"}): ${dateStr}, actual ${r.actual_km ?? "-"}km @ ${paceStr}, HR ${r.avg_hr ?? "-"}, distance:${dVerdict}, pace:${pVerdict}${splitNote}`;
     })
     .join("\n");
 
-  return `WEEKLY SUMMARY:\n${rollupLines}\n\nRUN-BY-RUN DETAIL:\n${runLines}`;
+  const projection = computeRaceProjection(runs);
+  const projectionLine = projection.current
+    ? `\n\nRACE PROJECTION: ${formatDuration(projection.current.projectedSeconds)} (Riegel formula, extrapolated from Wk${projection.current.week_number}'s best effort: ${projection.current.sourceKm}km ${projection.current.sourceBadge} @ ${formatPace(projection.current.sourcePaceSecPerKm)}). This is an estimate with real uncertainty -- not a guarantee.`
+    : "";
+
+  return `WEEKLY SUMMARY:\n${rollupLines}\n\nRUN-BY-RUN DETAIL (splits shown only when Garmin provided lap data):\n${runLines}${projectionLine}`;
+}
+
+const MARATHON_KM = 42.195;
+const RIEGEL_EXPONENT = 1.06;
+
+export function formatDuration(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = Math.round(totalSeconds % 60);
+  return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+}
+
+export type RaceProjectionPoint = {
+  week_number: number;
+  projectedSeconds: number;
+  sourceKm: number;
+  sourcePaceSecPerKm: number;
+  sourceBadge: string; // which run type produced this week's best effort
+};
+
+export type RaceProjection = {
+  current: RaceProjectionPoint | null;
+  history: RaceProjectionPoint[];
+};
+
+const MIN_PROJECTION_KM = 5; // Riegel's extrapolation is unreliable below this distance
+// Only runs at genuine race-representative effort are usable Riegel inputs.
+// Easy/medium/long/recovery runs are deliberately run well below race effort
+// (that's the point of them), so feeding one in just because it happened to
+// be the fastest thing logged so far this week produces a falsely slow
+// projection -- Riegel has no way to know a pace was "easy for you."
+const HARD_EFFORT_TYPES = new Set(["tempo", "pace", "race"]);
+
+/** Projects marathon finish time using Riegel's formula (T2 = T1 * (D2/D1)^1.06).
+ * Considers tempo, pace, and race-day runs of at least MIN_PROJECTION_KM --
+ * not just designated "pace run" weeks, but deliberately excluding easy,
+ * medium, long, and recovery runs, since those are run well below race
+ * effort on purpose and would falsely drag the projection slower if one
+ * happened to be the fastest thing logged before that week's hard session.
+ * For each week, takes the single best (fastest Riegel-implied) effort
+ * among eligible runs. Riegel is a well-established formula, not invented
+ * for this app, but it's still an ESTIMATE -- it doesn't account for
+ * marathon-specific glycogen depletion past ~30km, taper, weather, or
+ * race-day variables. */
+export function computeRaceProjection(runs: MatchedRun[]): RaceProjection {
+  const eligible = runs.filter(
+    (r) =>
+      r.actual_km &&
+      r.actual_km >= MIN_PROJECTION_KM &&
+      r.avg_pace_sec_per_km &&
+      HARD_EFFORT_TYPES.has(r.workout_type)
+  );
+
+  const byWeek = new Map<number, MatchedRun[]>();
+  for (const r of eligible) {
+    if (!byWeek.has(r.week_number)) byWeek.set(r.week_number, []);
+    byWeek.get(r.week_number)!.push(r);
+  }
+
+  const history: RaceProjectionPoint[] = [...byWeek.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([week, weekRuns]) => {
+      const points = weekRuns.map((r) => {
+        const t1 = r.actual_km! * r.avg_pace_sec_per_km!; // seconds, derived from pace (not raw logged duration)
+        const projectedSeconds = t1 * Math.pow(MARATHON_KM / r.actual_km!, RIEGEL_EXPONENT);
+        return { projectedSeconds, sourceKm: r.actual_km!, sourcePaceSecPerKm: r.avg_pace_sec_per_km!, sourceBadge: r.badge };
+      });
+      // best effort = lowest projected time
+      const best = points.reduce((a, b) => (b.projectedSeconds < a.projectedSeconds ? b : a));
+      return { week_number: week, projectedSeconds: Math.round(best.projectedSeconds), sourceKm: best.sourceKm, sourcePaceSecPerKm: best.sourcePaceSecPerKm, sourceBadge: best.sourceBadge };
+    });
+
+  return {
+    current: history.length ? history[history.length - 1] : null,
+    history,
+  };
 }
 
 
