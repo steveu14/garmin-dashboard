@@ -1,8 +1,80 @@
 @import "tailwindcss";
 
+/*
+  Design system: "Split Board" -- a race-timing-board aesthetic, dark mode.
+  Grounded in the subject (marathon training): tabular-mono numerals for
+  every metric (like a stopwatch/finish clock), a condensed athletic
+  display face for headings (race-bib energy), and a signal-flag color
+  system for run status that maps to how timing boards actually use color.
+
+  Token roles:
+    --color-paper       page background (deepest, dark)
+    --color-paper-dim    elevated panel/card surface (slightly lighter than page)
+    --color-paper-line   borders/dividers
+    --color-void         deepest surface, darker than the page itself --
+                          used only for the hero clock + header accents so
+                          they read as a distinct inset panel, not just
+                          "another card"
+    --color-ink          primary text (light, on dark bg)
+    --color-ink-soft      secondary text
+    --color-ink-faint     tertiary text / labels
+*/
+@theme {
+  --color-paper: #16171d;
+  --color-paper-dim: #1e2028;
+  --color-paper-line: #2c2f3a;
+  --color-void: #0c0d11;
+
+  --color-ink: #edeeea;
+  --color-ink-soft: #a3a6b3;
+  --color-ink-faint: #6b6e7b;
+
+  --color-bib: #e2505c;
+  --color-bib-tint: rgba(226, 80, 92, 0.14);
+  --color-lane: #6fa0da;
+  --color-lane-tint: rgba(111, 160, 218, 0.14);
+
+  --color-flag-green: #3fbb84;
+  --color-flag-green-tint: rgba(63, 187, 132, 0.14);
+  --color-flag-amber: #e3a53f;
+  --color-flag-amber-tint: rgba(227, 165, 63, 0.14);
+  --color-flag-red: #e2505c;
+  --color-flag-red-tint: rgba(226, 80, 92, 0.14);
+  --color-flag-blue: #6fa0da;
+  --color-flag-blue-tint: rgba(111, 160, 218, 0.14);
+
+  --font-display: var(--font-oswald), "Arial Narrow", sans-serif;
+  --font-body: var(--font-manrope), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), "SF Mono", monospace;
+}
+
 @layer base {
   body {
-    background-color: #f5f5f3;
-    color: #1a1a18;
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-body);
+  }
+
+  ::selection {
+    background-color: var(--color-bib-tint);
+    color: var(--color-bib);
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: var(--font-display);
+    letter-spacing: 0.01em;
+  }
+  .font-mono-data {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+  .eyebrow {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-weight: 600;
   }
 }

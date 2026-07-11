@@ -1,20 +1,19 @@
 import TrainingPlan from "@/components/TrainingPlan";
-import Link from "next/link";
+import SiteHeader from "@/components/SiteHeader";
 
 export default function TrainingPage() {
   return (
-    <main className="max-w-6xl mx-auto px-4 py-8">
-      <div className="mb-8">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="w-3 h-3 rounded-full bg-primary inline-block animate-pulse" />
-          <h1 className="text-2xl font-bold tracking-tight">Training Plan</h1>
+    <>
+      <SiteHeader />
+      <main className="max-w-7xl mx-auto px-4 py-6">
+        <div className="mb-5">
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-[var(--color-ink)]">Training Plan</h1>
+          <p className="text-sm text-[var(--color-ink-faint)] mt-0.5">
+            Split sheet: plan vs actual, matched by week from Garmin activities.
+          </p>
         </div>
-        <p className="text-sm text-muted-foreground">
-          Plan vs actual, matched from Garmin activities.{" "}
-          <Link href="/" className="underline hover:text-neutral-900">Back to Fitness Dashboard</Link>
-        </p>
-      </div>
-      <TrainingPlan />
-    </main>
+        <TrainingPlan />
+      </main>
+    </>
   );
 }

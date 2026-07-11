@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { RefreshCw, TrendingUp, TrendingDown, CheckCircle2 } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 import CoachChat from "@/components/CoachChat";
+import RaceClock from "@/components/RaceClock";
+import RaceProjection from "@/components/RaceProjection";
 import {
   PlannedWorkout,
   Activity,
@@ -19,26 +20,31 @@ import {
   FeedbackSeverity,
 } from "@/lib/trainingFeedback";
 
-function severityBadgeClass(severity: FeedbackSeverity) {
+function flagColor(severity: FeedbackSeverity) {
   switch (severity) {
-    case "good":
-      return "bg-emerald-100 text-emerald-700 border-transparent";
-    case "info":
-      return "bg-blue-100 text-blue-700 border-transparent";
-    case "warning":
-      return "bg-amber-100 text-amber-700 border-transparent";
-    case "missed":
-      return "bg-red-100 text-red-700 border-transparent";
+    case "good": return "var(--color-flag-green)";
+    case "info": return "var(--color-flag-blue)";
+    case "warning": return "var(--color-flag-amber)";
+    case "missed": return "var(--color-flag-red)";
   }
 }
 
-function severityLabel(severity: FeedbackSeverity) {
+function flagLabel(severity: FeedbackSeverity) {
   switch (severity) {
     case "good": return "On track";
     case "info": return "Extra";
     case "warning": return "Review";
     case "missed": return "Missed";
   }
+}
+
+function StatusFlag({ severity }: { severity: FeedbackSeverity }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 font-mono-data text-[11px] uppercase tracking-wide" style={{ color: flagColor(severity) }}>
+      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: flagColor(severity) }} />
+      {flagLabel(severity)}
+    </span>
+  );
 }
 
 function fmtDate(d: string) {
@@ -63,7 +69,7 @@ export default function TrainingPlan() {
       const [planRes, actRes] = await Promise.all([
         supabase.from("planned_workouts").select("*").order("workout_date"),
         supabase.from("activities").select(
-          "activity_date, activity_name, activity_type, distance_km, duration_seconds, avg_pace_sec_per_km, avg_hr"
+          "activity_date, activity_name, activity_type, distance_km, duration_seconds, avg_pace_sec_per_km, avg_hr, splits"
         ),
       ]);
       if (planRes.error) throw planRes.error;
@@ -86,8 +92,6 @@ export default function TrainingPlan() {
   );
 
   const todayStr = new Date().toISOString().slice(0, 10);
-  // "up to today" = everything through the current week (weeks are matched as a
-  // whole, so partial-week filtering by exact day doesn't make sense here).
   const currentWeekNumber = useMemo(() => {
     const pastWeeks = plan.filter((p) => p.workout_date <= todayStr).map((p) => p.week_number);
     return pastWeeks.length ? Math.max(...pastWeeks) : 0;
@@ -102,162 +106,142 @@ export default function TrainingPlan() {
   const currentWeek = weeklyRollups.find((w) => w.week_number === currentWeekNumber) ?? weeklyRollups[weeklyRollups.length - 1];
 
   const missedCount = visibleRuns.filter((r) => r.planned_km && !r.actual_km).length;
-  const reviewCount = visibleRuns.filter((r) => {
-    const { severity } = buildFeedback(r);
-    return severity === "warning";
-  }).length;
+  const reviewCount = visibleRuns.filter((r) => buildFeedback(r).severity === "warning").length;
 
   if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 gap-3 text-neutral-400">
-      <RefreshCw className="w-6 h-6 animate-spin text-emerald-500" />
-      <span className="text-sm">Loading training data...</span>
+    <div className="flex flex-col items-center justify-center py-32 gap-3 text-[var(--color-ink-faint)]">
+      <RefreshCw className="w-6 h-6 animate-spin text-[var(--color-bib)]" />
+      <span className="font-mono-data text-sm">Loading training data...</span>
     </div>
   );
 
   if (error) return (
-    <Card className="border-red-200 bg-red-50">
-      <CardContent className="pt-6 text-sm text-red-600">
+    <Card className="border-[var(--color-flag-red)]/30 bg-[var(--color-flag-red-tint)]">
+      <CardContent className="pt-6 text-sm text-[var(--color-flag-red)]">
         Could not load training data from Supabase.
-        <br /><span className="opacity-60 text-xs">{error}</span>
+        <br /><span className="opacity-60 text-xs font-mono-data">{error}</span>
       </CardContent>
     </Card>
   );
 
   return (
-    <div className="space-y-5">
-      {/* Refresh row */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={() => setShowFuture((v) => !v)}
-          className="text-xs text-neutral-500 hover:text-neutral-900 bg-white border border-neutral-200 rounded-lg px-3 py-1.5 transition-colors"
-        >
-          {showFuture ? "Show up to today" : "Show full plan"}
-        </button>
-        <button onClick={() => load(true)}
-          className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 bg-white border border-neutral-200 rounded-lg px-3 py-1.5 transition-colors">
-          <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
-          Refresh
-        </button>
-      </div>
+    <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-5 items-start">
+      {/* Main column */}
+      <div className="space-y-5 min-w-0">
+        <RaceClock currentWeek={currentWeekNumber} />
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Card className="relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500" />
-          <CardHeader className="pb-1 pt-4 px-5">
-            <CardTitle className="text-xs font-medium text-neutral-500">Current Week</CardTitle>
-          </CardHeader>
-          <CardContent className="px-5 pb-4">
-            <div className="text-2xl font-bold text-neutral-900">{currentWeek ? `Week ${currentWeek.week_number}` : "—"}</div>
-            <div className="text-xs text-neutral-400 mt-0.5">{currentWeek?.phase ?? ""}</div>
-          </CardContent>
-        </Card>
-        <Card className="relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
-          <CardHeader className="pb-1 pt-4 px-5">
-            <CardTitle className="text-xs font-medium text-neutral-500">This Week's Volume</CardTitle>
-          </CardHeader>
-          <CardContent className="px-5 pb-4">
-            <div className="text-2xl font-bold text-neutral-900">
-              {currentWeek ? `${currentWeek.actual_km} / ${currentWeek.planned_km}km` : "—"}
+        {/* Controls row */}
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setShowFuture((v) => !v)}
+            className="eyebrow text-[11px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] bg-[var(--color-paper-dim)] border border-[var(--color-paper-line)] rounded-md px-3 py-1.5 transition-colors"
+          >
+            {showFuture ? "Show up to today" : "Show full plan"}
+          </button>
+          <button onClick={() => load(true)}
+            className="flex items-center gap-1.5 eyebrow text-[11px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] bg-[var(--color-paper-dim)] border border-[var(--color-paper-line)] rounded-md px-3 py-1.5 transition-colors">
+            <RefreshCw className={cn("w-3.5 h-3.5", refreshing && "animate-spin")} />
+            Refresh
+          </button>
+        </div>
+
+        {/* Summary strip -- scoreboard style, not generic stat cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 rounded-xl border border-[var(--color-paper-line)] bg-[var(--color-paper-dim)] overflow-hidden">
+          {[
+            { label: "Current Week", value: currentWeek ? `W${currentWeek.week_number}` : "—", sub: currentWeek?.phase ?? "", color: "var(--color-ink)" },
+            { label: "Volume", value: currentWeek ? `${currentWeek.actual_km}/${currentWeek.planned_km}` : "—", sub: "actual / planned km", color: "var(--color-lane)" },
+            { label: "To Review", value: String(reviewCount), sub: "pace / HR / distance", color: "var(--color-flag-amber)" },
+            { label: "Missed", value: String(missedCount), sub: "no activity found", color: "var(--color-flag-red)" },
+          ].map((s, i) => (
+            <div key={s.label} className={cn("px-5 py-4", i > 0 && "border-l border-[var(--color-paper-line)]")}>
+              <div className="eyebrow text-[10px] text-[var(--color-ink-faint)] mb-1.5">{s.label}</div>
+              <div className="font-mono-data text-2xl font-medium" style={{ color: s.color }}>{s.value}</div>
+              <div className="text-[11px] text-[var(--color-ink-faint)] mt-0.5">{s.sub}</div>
             </div>
-            <div className="text-xs text-neutral-400 mt-0.5">actual / planned</div>
+          ))}
+        </div>
+
+        {/* Weekly volume chart */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle>Weekly Volume</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={weeklyRollups} barGap={4}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--color-paper-dim)" vertical={false} />
+                <XAxis dataKey="week_number" tickFormatter={(w) => `${w}`} tick={{ fontSize: 11, fill: "#9a9da6", fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: "#9a9da6", fontFamily: "var(--font-mono)" }} axisLine={false} tickLine={false} unit="km" />
+                <Tooltip
+                  contentStyle={{ borderRadius: 8, border: "1px solid var(--color-paper-line)", backgroundColor: "var(--color-paper-dim)", color: "var(--color-ink)", fontFamily: "var(--font-mono)", fontSize: 12 }}
+                  labelStyle={{ color: "var(--color-ink-faint)" }}
+                  itemStyle={{ color: "var(--color-ink)" }}
+                />
+                <Bar dataKey="planned_km" name="Planned" fill="var(--color-paper-line)" radius={[3,3,0,0]} />
+                <Bar dataKey="actual_km" name="Actual" fill="var(--color-bib)" radius={[3,3,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
           </CardContent>
         </Card>
-        <Card className="relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-1 h-full bg-amber-500" />
-          <CardHeader className="pb-1 pt-4 px-5">
-            <CardTitle className="text-xs font-medium text-neutral-500">Runs to Review</CardTitle>
+
+        <RaceProjection runs={matchedRuns} />
+
+        {/* Split sheet: plan vs actual */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Split Sheet</CardTitle>
+            <p className="text-xs text-[var(--color-ink-faint)] normal-case font-body">
+              Runs matched to plan by distance/pace rank within each week, not exact day.
+            </p>
           </CardHeader>
-          <CardContent className="px-5 pb-4">
-            <div className="text-2xl font-bold text-neutral-900">{reviewCount}</div>
-            <div className="text-xs text-neutral-400 mt-0.5">pace/HR/distance flags</div>
-          </CardContent>
-        </Card>
-        <Card className="relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-1 h-full bg-red-500" />
-          <CardHeader className="pb-1 pt-4 px-5">
-            <CardTitle className="text-xs font-medium text-neutral-500">Missed Runs</CardTitle>
-          </CardHeader>
-          <CardContent className="px-5 pb-4">
-            <div className="text-2xl font-bold text-neutral-900">{missedCount}</div>
-            <div className="text-xs text-neutral-400 mt-0.5">planned, no activity found</div>
+          <CardContent className="p-0">
+            {visibleRuns.length === 0
+              ? <p className="text-[var(--color-ink-faint)] text-sm px-6 pb-6">No plan data yet — seed planned_workouts in Supabase.</p>
+              : <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr>
+                        {["Ran on","Wk","Workout","Planned","Actual","Pace","HR","Status"].map(h => (
+                          <th key={h} className="text-left eyebrow text-[10px] text-[var(--color-ink-faint)] px-4 py-2.5 whitespace-nowrap border-b border-[var(--color-paper-line)]">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono-data">
+                      {visibleRuns
+                        .slice()
+                        .sort((a, b) => {
+                          if (b.week_number !== a.week_number) return b.week_number - a.week_number;
+                          return (b.planned_km ?? -1) - (a.planned_km ?? -1);
+                        })
+                        .map((r, i) => {
+                          const { severity } = buildFeedback(r);
+                          return (
+                            <tr key={`${r.week_number}-${r.badge}-${i}`} className={cn("transition-colors hover:bg-[var(--color-paper-dim)]", i % 2 === 1 && "bg-[var(--color-paper)]")}>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-faint)] text-xs whitespace-nowrap">{r.activity_date ? fmtDate(r.activity_date) : "—"}</td>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-faint)] text-xs whitespace-nowrap">{r.week_number}</td>
+                              <td className="px-4 py-2.5 font-display font-medium text-[var(--color-ink)] whitespace-nowrap normal-case tracking-normal">{r.badge}</td>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-soft)] whitespace-nowrap">{r.planned_km ? `${r.planned_km}km` : "—"}</td>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-soft)] whitespace-nowrap">{r.actual_km ? `${r.actual_km}km` : "—"}</td>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-soft)] whitespace-nowrap">{formatPace(r.avg_pace_sec_per_km)}</td>
+                              <td className="px-4 py-2.5 text-[var(--color-ink-soft)] whitespace-nowrap">{r.avg_hr ?? "—"}</td>
+                              <td className="px-4 py-2.5 whitespace-nowrap">
+                                <StatusFlag severity={severity} />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+            }
           </CardContent>
         </Card>
       </div>
 
-      {/* Weekly volume chart */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-semibold">Weekly Volume: Planned vs Actual</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={weeklyRollups} barGap={4}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0ee" vertical={false} />
-              <XAxis dataKey="week_number" tickFormatter={(w) => `Wk ${w}`} tick={{ fontSize: 11, fill: "#aaa" }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: "#aaa" }} axisLine={false} tickLine={false} unit="km" />
-              <Tooltip />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="planned_km" name="Planned" fill="#d4d4d4" radius={[4,4,0,0]} />
-              <Bar dataKey="actual_km" name="Actual" fill="#10b981" radius={[4,4,0,0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </CardContent>
-      </Card>
-
-      {/* Plan vs actual, matched within each week */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold">Plan vs Actual</CardTitle>
-          <p className="text-xs text-neutral-400">
-            Runs are matched to plan by distance rank within each week, not by exact day — e.g. the week's longest run is treated as the long run, regardless of which day it fell on.
-          </p>
-        </CardHeader>
-        <CardContent className="p-0">
-          {visibleRuns.length === 0
-            ? <p className="text-neutral-400 text-sm px-6 pb-6">No plan data yet — seed planned_workouts in Supabase.</p>
-            : <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-t border-neutral-100">
-                      {["Ran on","Wk","Workout","Planned","Actual","Pace","Avg HR","Status"].map(h => (
-                        <th key={h} className="text-left text-xs font-semibold text-neutral-400 uppercase tracking-wide px-5 py-3 whitespace-nowrap bg-neutral-50">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleRuns
-                      .slice()
-                      .sort((a, b) => {
-                        if (b.week_number !== a.week_number) return b.week_number - a.week_number;
-                        return (b.planned_km ?? -1) - (a.planned_km ?? -1);
-                      })
-                      .map((r, i) => {
-                        const { severity } = buildFeedback(r);
-                        return (
-                          <tr key={`${r.week_number}-${r.badge}-${i}`} className="border-t border-neutral-100 hover:bg-neutral-50 transition-colors align-top">
-                            <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{r.activity_date ? fmtDate(r.activity_date) : "—"}</td>
-                            <td className="px-5 py-3 text-neutral-400 text-xs whitespace-nowrap">{r.week_number}</td>
-                            <td className="px-5 py-3 font-semibold text-neutral-900 whitespace-nowrap">{r.badge}</td>
-                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.planned_km ? `${r.planned_km}km` : "—"}</td>
-                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.actual_km ? `${r.actual_km}km` : "—"}</td>
-                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{formatPace(r.avg_pace_sec_per_km)}</td>
-                            <td className="px-5 py-3 text-neutral-600 whitespace-nowrap">{r.avg_hr ?? "—"}</td>
-                            <td className="px-5 py-3 whitespace-nowrap">
-                              <Badge className={severityBadgeClass(severity)}>{severityLabel(severity)}</Badge>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                  </tbody>
-                </table>
-              </div>
-          }
-        </CardContent>
-      </Card>
-
-      <CoachChat rollups={weeklyRollups} runs={visibleRuns} />
+      {/* Sidebar: coach chat, sticky */}
+      <div className="lg:sticky lg:top-4 lg:self-start w-full lg:max-h-[calc(100vh-2rem)]">
+        <CoachChat rollups={weeklyRollups} runs={visibleRuns} />
+      </div>
     </div>
   );
 }
